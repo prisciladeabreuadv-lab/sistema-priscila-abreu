@@ -1,0 +1,24 @@
+name: Verificação diária de processos (DataJud + DJEN)
+
+on:
+  schedule:
+    - cron: "0 10 * * *"   # 10:00 UTC = 07:00 em horário de Brasília (sem horário de verão)
+  workflow_dispatch: {}     # permite rodar manualmente pelo botão "Run workflow" na aba Actions
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Rodar verificação de processos
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/verificar-processos.mjs
