@@ -54,6 +54,14 @@
   @media (max-width:780px){
     .hide-mobile{display:none !important;}
   }
+  .hide-desktop{display:none;}
+  .conteudo-principal{padding:28px 34px;}
+  @media (max-width:900px){
+    .hide-desktop{display:flex !important;}
+    .conteudo-principal{padding:70px 16px 24px !important;}
+    .sidebar-mobile-oculta{display:none !important;}
+  }
+  .tabela-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
 </style>
 </head>
 <body>
@@ -520,15 +528,30 @@ const MENU = [
 
 function Sidebar({paginaAtual,onIrPara,usuario,onSair,contadores}){
   const [aberto,setAberto] = useState(false);
+
+  const irPara = (id) => { onIrPara(id); setAberto(false); };
+
   return (
     <>
-      <button onClick={()=>setAberto(true)} className="hide-desktop" style={{position:"fixed",top:14,left:14,zIndex:40,background:"var(--navy)",color:"#fff",border:"none",borderRadius:8,padding:9,display:"none"}}>
+      <button onClick={()=>setAberto(true)} className="hide-desktop" style={{position:"fixed",top:14,left:14,zIndex:60,background:"var(--navy)",color:"#fff",border:"none",borderRadius:8,padding:9,alignItems:"center",justifyContent:"center"}}>
         <Icon name="tarefas" color="#fff"/>
       </button>
+
+      {aberto && (
+        <div onClick={()=>setAberto(false)} className="hide-desktop" style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:70}}/>
+      )}
+
       <div style={{
           width:238, minWidth:238, background:"var(--navy)", color:"#fff",
-          display:"flex", flexDirection:"column", height:"100vh", position:"sticky", top:0,
-        }}>
+          display:"flex", flexDirection:"column", height:"100vh",
+          position: aberto ? "fixed" : "sticky", top:0, left:0, zIndex:80,
+          transform: "translateX(0)",
+        }}
+        className={aberto ? "" : "sidebar-mobile-oculta"}
+      >
+        <button onClick={()=>setAberto(false)} className="hide-desktop" style={{position:"absolute",top:14,right:14,background:"none",border:"none",color:"#fff",cursor:"pointer"}}>
+          <Icon name="fechar" size={20} color="#fff"/>
+        </button>
         <div style={{padding:"26px 20px 18px",borderBottom:"1px solid rgba(184,154,78,0.25)"}}>
           <div style={{background:"#fff",borderRadius:8,padding:"10px 8px"}}>
             <LogoMarca size={150} comTexto={false}/>
@@ -537,7 +560,7 @@ function Sidebar({paginaAtual,onIrPara,usuario,onSair,contadores}){
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"14px 10px"}}>
           {MENU.map(m=>(
-            <div key={m.id} onClick={()=>onIrPara(m.id)}
+            <div key={m.id} onClick={()=>irPara(m.id)}
               style={{
                 display:"flex",alignItems:"center",gap:11,padding:"11px 14px",borderRadius:8,cursor:"pointer",
                 marginBottom:3, fontSize:14.5,
@@ -1585,7 +1608,7 @@ function PaginaAgenda({agenda,setAgenda,processos,clientes,googleToken}){
         </div>
       </div>
       {erroSync && <div style={{color:"var(--red)",fontSize:13.5,marginBottom:14}}>{erroSync}</div>}
-      {!googleToken && <div style={{background:"var(--bg2)",borderRadius:9,padding:"11px 14px",fontSize:13.5,marginBottom:18}}>Conecte o Google Agenda em <b>Configurações</b> para sincronizar seus compromissos automaticamente.</div>}
+      {!googleToken && <div style={{background:"var(--bg2)",borderRadius:9,padding:"11px 14px",fontSize:13.5,marginBottom:18}}>Conecte o Google Agenda em <b>Configurações</b> para enviar automaticamente compromissos, prazos de tarefas e prazos de processos para o seu Google Agenda.</div>}
 
       <div style={{background:"var(--card)",borderRadius:12,boxShadow:"var(--shadow)",border:"1px solid var(--border)",overflow:"hidden",marginBottom:24}}>
         {futuros.length===0 && <div style={{padding:26,textAlign:"center",color:"var(--text3)"}}>Nenhum compromisso futuro.</div>}
@@ -2369,7 +2392,7 @@ function PaginaConfig({usuario,config,setConfig,googleToken,onConectarGoogle}){
           <label style={labelStyle}>Google Client ID (OAuth)</label>
           <input style={campoStyle} value={f.googleClientId||""} onChange={e=>s("googleClientId",e.target.value)} placeholder="xxxxxxxx.apps.googleusercontent.com"/>
           <div style={{fontSize:12,color:"var(--text3)",marginTop:-8,marginBottom:14}}>
-            Crie em <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">console.cloud.google.com</a> (tipo "Aplicativo Web") para sincronizar a Agenda deste sistema com o Google Agenda.
+            Crie em <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">console.cloud.google.com</a> (tipo "Aplicativo Web"). Com o Google conectado, tarefas com prazo, prazos de processos e compromissos/audiências da Agenda são enviados automaticamente para o Google Agenda — não precisa clicar em nada. A conexão dura cerca de 1 hora; se expirar, clique em "Reconectar" para retomar o envio automático.
           </div>
 
           <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
@@ -2495,6 +2518,45 @@ function AppPrincipal({usuario, onSair}){
     })();
   },[carregado, config.datajudApiKey, config.oabNumero, config.oabUf]);
 
+  // Sincronização automática com o Google Agenda: sempre que houver um token válido (Google
+  // conectado em Configurações) e novos compromissos, prazos de tarefas ou prazos de processos
+  // ainda não enviados, cria os eventos automaticamente — sem precisar clicar em nada.
+  useEffect(()=>{
+    if(!carregado || !googleToken) return;
+    (async () => {
+      const compromissosPendentes = agenda.filter(a=>!a.googleSynced && a.data && diasEntre(a.data)>=0);
+      for(const c of compromissosPendentes){
+        try{
+          await criarEventoGoogle(googleToken, c);
+          setAgenda(ag=>ag.map(x=>x.id===c.id?{...x,googleSynced:true}:x));
+        }catch(e){ /* tenta de novo na próxima verificação */ }
+      }
+
+      const tarefasPendentes = tarefas.filter(t=>t.prazo && !t.arquivada && t.status!=="concluida" && t.googleSyncedPrazo!==t.prazo && diasEntre(t.prazo)>=0);
+      for(const t of tarefasPendentes){
+        try{
+          await criarEventoGoogle(googleToken, {data:t.prazo, hora:"09:00", titulo:`Prazo: ${t.titulo}`, local:"", obs:t.obs||""});
+          setTarefas(ts=>ts.map(x=>x.id===t.id?{...x,googleSyncedPrazo:t.prazo}:x));
+        }catch(e){ /* tenta de novo na próxima verificação */ }
+      }
+
+      const processosPendentes = processos.filter(p=>p.prazo && !p.arquivado && p.googleSyncedPrazo!==p.prazo && diasEntre(p.prazo)>=0);
+      for(const p of processosPendentes){
+        const cli = clientes.find(c=>c.id===p.clienteId);
+        try{
+          await criarEventoGoogle(googleToken, {
+            data: p.prazo,
+            hora: "09:00",
+            titulo: `Prazo: ${p.prazoAto || "processo"} — ${p.numero || "sem número"}`,
+            local: "",
+            obs: `${cli?.nome ? `Cliente: ${cli.nome}. ` : ""}${p.assunto || ""}`,
+          });
+          setProcessos(ps=>ps.map(x=>x.id===p.id?{...x,googleSyncedPrazo:p.prazo}:x));
+        }catch(e){ /* tenta de novo na próxima verificação */ }
+      }
+    })();
+  },[carregado, googleToken, agenda, tarefas, processos]);
+
   const irParaProcesso = (id) => { setPagina("processos"); setAbrirProcessoId(id); };
 
   const contadores = {
@@ -2510,7 +2572,7 @@ function AppPrincipal({usuario, onSair}){
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
       <Sidebar paginaAtual={pagina} onIrPara={(p)=>{setPagina(p);setAbrirProcessoId(null);}} usuario={usuario} onSair={onSair} contadores={contadores}/>
-      <div style={{flex:1,padding:"28px 34px",maxWidth:"100%",overflowX:"hidden"}}>
+      <div className="conteudo-principal" style={{flex:1,maxWidth:"100%",overflowX:"hidden"}}>
         {pagina==="dashboard" && <PaginaDashboard processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} tarefas={tarefas} setTarefas={setTarefas} agenda={agenda} setAgenda={setAgenda} parcelas={parcelas} onIrPara={setPagina} onAbrirProcesso={irParaProcesso}/>}
         {pagina==="processos" && <PaginaProcessos processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} abrirProcessoId={abrirProcessoId} onProcessoAberto={()=>setAbrirProcessoId(null)} datajudApiKey={config.datajudApiKey} oabNumero={config.oabNumero} oabUf={config.oabUf} intimacoes={intimacoes} setIntimacoes={setIntimacoes}/>}
         {pagina==="clientes" && <PaginaClientes clientes={clientes} setClientes={setClientes} processos={processos} onAbrirProcesso={irParaProcesso}/>}
