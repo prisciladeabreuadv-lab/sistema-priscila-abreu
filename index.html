@@ -1173,12 +1173,43 @@ function ModalDetalheProcesso({p,cliente,onClose,onEdit,onExcluir,onAddAndamento
 }
 
 // ---------- Página: Processos ----------
-function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProcessoId,onProcessoAberto,datajudApiKey,labels=LABELS_PROCESSO}){
+function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProcessoId,onProcessoAberto,datajudApiKey,oabNumero,oabUf,labels=LABELS_PROCESSO}){
   const [busca,setBusca] = useState("");
   const [filtroStatus,setFiltroStatus] = useState("ativos");
   const [novo,setNovo] = useState(false);
   const [editando,setEditando] = useState(null);
   const [detalheId,setDetalheId] = useState(abrirProcessoId||null);
+  const [buscandoOAB,setBuscandoOAB] = useState(false);
+  const [erroOAB,setErroOAB] = useState("");
+  const [resultadoOAB,setResultadoOAB] = useState(null);
+
+  const buscarPorOAB = async () => {
+    setErroOAB(""); setResultadoOAB(null);
+    if(!oabNumero || !oabUf){ setErroOAB("Informe seu número e UF da OAB em Configurações antes de buscar."); return; }
+    setBuscandoOAB(true);
+    try{
+      const encontradas = await buscarIntimacoesDJEN({oabNumero, oabUf, dias:30});
+      const idsAtualizados = new Set();
+      let movimentacoesNovas = 0;
+      let semCorrespondencia = 0;
+      const proxProcessos = processos.map(p=>({...p, andamentos:[...(p.andamentos||[])]}));
+      encontradas.forEach(it=>{
+        const numLimpo = (it.numeroProcesso||"").replace(/\D/g,"");
+        if(!numLimpo){ semCorrespondencia++; return; }
+        const proc = proxProcessos.find(p=>(p.numero||"").replace(/\D/g,"")===numLimpo);
+        if(!proc){ semCorrespondencia++; return; }
+        const desc = `Publicação DJEN: ${(it.texto||"").slice(0,200)||"—"}`;
+        const jaExiste = proc.andamentos.some(a=>a.desc===desc && a.data===it.data);
+        if(jaExiste) return;
+        proc.andamentos.push({data: it.data||fmtDataHoje(), desc, fonte:"djen"});
+        movimentacoesNovas++;
+        idsAtualizados.add(proc.id);
+      });
+      setProcessos(proxProcessos);
+      setResultadoOAB({total: encontradas.length, processosAtualizados: idsAtualizados.size, movimentacoesNovas, semCorrespondencia});
+    }catch(e){ setErroOAB(e.message||"Erro ao consultar publicações pela OAB."); }
+    setBuscandoOAB(false);
+  };
 
   useEffect(()=>{ if(abrirProcessoId){ setDetalheId(abrirProcessoId); onProcessoAberto&&onProcessoAberto(); } },[abrirProcessoId]);
 
@@ -1218,10 +1249,25 @@ function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProce
           <h2 style={{fontSize:30}}>{labels.tituloPagina}</h2>
           <div style={{color:"var(--text2)",fontSize:14.5}}>{filtrados.length} {labels.contagem} {filtroStatus==="ativos"?"ativo(s)":filtroStatus==="arquivados"?"arquivado(s)":""}</div>
         </div>
-        <button onClick={()=>setNovo(true)} style={{...btnPrimario,display:"flex",alignItems:"center",gap:7}}>
-          <Icon name="mais" size={15} color="#fff"/> {labels.novo}
-        </button>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          {labels.mostrarDataJud && (
+            <button onClick={buscarPorOAB} disabled={buscandoOAB} style={{...btnSecundario,display:"flex",alignItems:"center",gap:7}}>
+              <Icon name="sync" size={15}/> {buscandoOAB?"Buscando…":"Buscar por OAB e atualizar"}
+            </button>
+          )}
+          <button onClick={()=>setNovo(true)} style={{...btnPrimario,display:"flex",alignItems:"center",gap:7}}>
+            <Icon name="mais" size={15} color="#fff"/> {labels.novo}
+          </button>
+        </div>
       </div>
+
+      {(erroOAB || resultadoOAB) && (
+        <div style={{marginBottom:16,padding:"12px 16px",borderRadius:8,fontSize:13.5,
+          background: erroOAB?"rgba(166,66,58,0.1)":"rgba(62,107,79,0.1)",
+          color: erroOAB?"var(--red)":"var(--green)"}}>
+          {erroOAB || `${resultadoOAB.processosAtualizados} processo(s) atualizado(s) com ${resultadoOAB.movimentacoesNovas} movimentação(ões) nova(s), a partir de ${resultadoOAB.total} publicação(ões) encontrada(s) para a OAB.${resultadoOAB.semCorrespondencia>0?` ${resultadoOAB.semCorrespondencia} publicação(ões) não corresponderam a nenhum processo cadastrado — confira na aba Intimações.`:""}`}
+        </div>
+      )}
 
       <div style={{display:"flex",gap:12,marginBottom:18,flexWrap:"wrap",alignItems:"center"}}>
         <div style={{position:"relative",flex:1,minWidth:220,maxWidth:360}}>
@@ -2416,7 +2462,7 @@ function AppPrincipal({usuario, onSair}){
       <Sidebar paginaAtual={pagina} onIrPara={(p)=>{setPagina(p);setAbrirProcessoId(null);}} usuario={usuario} onSair={onSair} contadores={contadores}/>
       <div style={{flex:1,padding:"28px 34px",maxWidth:"100%",overflowX:"hidden"}}>
         {pagina==="dashboard" && <PaginaDashboard processos={processos} setProcessos={setProcessos} sindicancias={sindicancias} setSindicancias={setSindicancias} peps={peps} setPeps={setPeps} clientes={clientes} setClientes={setClientes} tarefas={tarefas} setTarefas={setTarefas} agenda={agenda} setAgenda={setAgenda} parcelas={parcelas} onIrPara={setPagina} onAbrirProcesso={irParaProcesso}/>}
-        {pagina==="processos" && <PaginaProcessos processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} abrirProcessoId={abrirProcessoId} onProcessoAberto={()=>setAbrirProcessoId(null)} datajudApiKey={config.datajudApiKey}/>}
+        {pagina==="processos" && <PaginaProcessos processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} abrirProcessoId={abrirProcessoId} onProcessoAberto={()=>setAbrirProcessoId(null)} datajudApiKey={config.datajudApiKey} oabNumero={config.oabNumero} oabUf={config.oabUf}/>}
         {pagina==="sindicancias" && <PaginaProcessos processos={sindicancias} setProcessos={setSindicancias} clientes={clientes} setClientes={setClientes} datajudApiKey={config.datajudApiKey} labels={LABELS_SINDICANCIA}/>}
         {pagina==="peps" && <PaginaProcessos processos={peps} setProcessos={setPeps} clientes={clientes} setClientes={setClientes} datajudApiKey={config.datajudApiKey} labels={LABELS_PEP}/>}
         {pagina==="clientes" && <PaginaClientes clientes={clientes} setClientes={setClientes} processos={processos} onAbrirProcesso={irParaProcesso}/>}
