@@ -178,9 +178,9 @@ const corPrazo = (dias) => {
 // ---------- Persistência (Supabase quando configurado, senão window.storage) ----------
 async function stGet(key, fallback){
   if(supabaseConfigurado && SB_USER_ID){
-    const {data,error} = await sb.from("dados_sistema").select("valor").eq("user_id",SB_USER_ID).eq("chave",key).maybeSingle();
-    if(error || !data) return fallback;
-    return data.valor;
+    const {data,error} = await sb.from("dados_sistema").select("valor").eq("user_id",SB_USER_ID).eq("chave",key).order("atualizado_em",{ascending:false}).limit(1);
+    if(error || !data || data.length===0) return fallback;
+    return data[0].valor;
   }
   try{
     const r = await window.storage.get(key, false);
@@ -190,7 +190,10 @@ async function stGet(key, fallback){
 }
 async function stSet(key, value){
   if(supabaseConfigurado && SB_USER_ID){
-    const {error} = await sb.from("dados_sistema").upsert({user_id:SB_USER_ID, chave:key, valor:value, atualizado_em:new Date().toISOString()});
+    const {error} = await sb.from("dados_sistema").upsert(
+      {user_id:SB_USER_ID, chave:key, valor:value, atualizado_em:new Date().toISOString()},
+      {onConflict:"user_id,chave"}
+    );
     if(error) console.error("Erro ao salvar no Supabase", key, error);
     return;
   }
