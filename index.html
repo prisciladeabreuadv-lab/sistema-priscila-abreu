@@ -440,8 +440,6 @@ function TelaLogin({onLogin}){
 const MENU = [
   {id:"dashboard", label:"Painel", icon:"dashboard"},
   {id:"processos", label:"Processos", icon:"processos"},
-  {id:"sindicancias", label:"Sindicâncias", icon:"escudo"},
-  {id:"peps", label:"PEP", icon:"balanca"},
   {id:"clientes", label:"Clientes", icon:"clientes"},
   {id:"tarefas", label:"Tarefas", icon:"tarefas"},
   {id:"agenda", label:"Agenda", icon:"agenda"},
@@ -538,7 +536,7 @@ function Badge({texto,cor}){
 }
 
 // ---------- Página: Dashboard ----------
-function PaginaDashboard({processos,setProcessos,sindicancias,setSindicancias,peps,setPeps,clientes,setClientes,tarefas,setTarefas,agenda,setAgenda,parcelas,onIrPara,onAbrirProcesso}){
+function PaginaDashboard({processos,setProcessos,clientes,setClientes,tarefas,setTarefas,agenda,setAgenda,parcelas,onIrPara,onAbrirProcesso}){
   // Resumo de prazos por categoria, cada uma com sua regra de contagem (dias úteis x dias corridos)
   const resumoPrazos = (lista, usarDiasUteis) => {
     const ativosComPrazo = lista.filter(p=>!p.arquivado && p.prazo);
@@ -552,17 +550,13 @@ function PaginaDashboard({processos,setProcessos,sindicancias,setSindicancias,pe
   };
 
   const resumoProcessos = useMemo(()=>resumoPrazos(processos, true), [processos]);
-  const resumoSindicancias = useMemo(()=>resumoPrazos(sindicancias, false), [sindicancias]);
-  const resumoPeps = useMemo(()=>resumoPrazos(peps, false), [peps]);
 
   const prazosProximos = useMemo(()=>{
     const todos = [
       ...resumoProcessos.itens.map(p=>({...p, tipo:"Processo", pagina:"processos"})),
-      ...resumoSindicancias.itens.map(p=>({...p, tipo:"Sindicância", pagina:"sindicancias"})),
-      ...resumoPeps.itens.map(p=>({...p, tipo:"PEP", pagina:"peps"})),
     ];
     return todos.sort((a,b)=>a.dias-b.dias).slice(0,8);
-  },[resumoProcessos,resumoSindicancias,resumoPeps]);
+  },[resumoProcessos]);
 
   const tarefasAbertas = tarefas.filter(t=>t.status!=="concluida" && !t.arquivada);
   const processosAtivos = processos.filter(p=>!p.arquivado);
@@ -581,8 +575,6 @@ function PaginaDashboard({processos,setProcessos,sindicancias,setSindicancias,pe
   const executarAcoesIA = (acoes) => {
     let clientesLocais = [...clientes];
     let processosLocais = [...processos];
-    let sindicanciasLocais = [...sindicancias];
-    let pepsLocais = [...peps];
     let tarefasLocais = [...tarefas];
     let agendaLocais = [...agenda];
     const mensagens = [];
@@ -608,17 +600,14 @@ function PaginaDashboard({processos,setProcessos,sindicancias,setSindicancias,pe
           agendaLocais = [...agendaLocais, {id:uid(), titulo:acao.titulo, data:acao.data, hora:acao.hora||"09:00", local:acao.local||"", processoId:"", obs:"Criado pela IA."}];
           mensagens.push(`Compromisso agendado: "${acao.titulo}" em ${fmtData(acao.data)}${acao.hora?` às ${acao.hora}`:""}.`);
         }
-        else if((acao.acao==="criar_processo"||acao.acao==="criar_sindicancia"||acao.acao==="criar_pep") && acao.clienteNome){
+        else if(acao.acao==="criar_processo" && acao.clienteNome){
           const cliente = encontrarCliente(acao.clienteNome);
           if(!cliente){
             mensagens.push(`Não encontrei um cliente chamado "${acao.clienteNome}" — peça para eu cadastrar o cliente primeiro (ex: "cadastra o cliente ${acao.clienteNome} e depois cria o processo").`);
           }else{
-            const novoItem = {id:uid(), numero:acao.numero||"", clienteId:cliente.id, sistema: acao.acao==="criar_processo"?"PJe":"Extrajudicial", classificacao:"", vara:"", autor:"", reu:"", assunto:acao.assunto||"", valorCausa:"", prazo:acao.prazo||"", prazoAto:acao.prazoAto||"", obs:"Criado pela IA.", arquivado:false, andamentos:[]};
-            const rotulo = acao.acao==="criar_processo"?"Processo":acao.acao==="criar_sindicancia"?"Sindicância":"PEP";
-            if(acao.acao==="criar_processo") processosLocais = [...processosLocais, novoItem];
-            if(acao.acao==="criar_sindicancia") sindicanciasLocais = [...sindicanciasLocais, novoItem];
-            if(acao.acao==="criar_pep") pepsLocais = [...pepsLocais, novoItem];
-            mensagens.push(`${rotulo} criado(a) para ${cliente.nome}${acao.numero?` (nº ${acao.numero})`:""}.`);
+            const novoItem = {id:uid(), numero:acao.numero||"", clienteId:cliente.id, sistema:"PJe", classificacao:"", vara:"", autor:"", reu:"", assunto:acao.assunto||"", valorCausa:"", prazo:acao.prazo||"", prazoAto:acao.prazoAto||"", obs:"Criado pela IA.", arquivado:false, andamentos:[]};
+            processosLocais = [...processosLocais, novoItem];
+            mensagens.push(`Processo criado para ${cliente.nome}${acao.numero?` (nº ${acao.numero})`:""}.`);
           }
         }
         else if(acao.acao==="concluir_tarefa" && acao.tituloTarefa){
@@ -637,8 +626,6 @@ function PaginaDashboard({processos,setProcessos,sindicancias,setSindicancias,pe
 
     setClientes(clientesLocais);
     setProcessos(processosLocais);
-    setSindicancias(sindicanciasLocais);
-    setPeps(pepsLocais);
     setTarefas(tarefasLocais);
     setAgenda(agendaLocais);
     return mensagens;
@@ -654,10 +641,8 @@ Além de responder perguntas, você pode executar ações diretamente no sistema
 - Criar tarefa: <<ACAO>>{"acao":"criar_tarefa","titulo":"...","prazo":"AAAA-MM-DD ou vazio"}<<FIM_ACAO>>
 - Agendar compromisso: <<ACAO>>{"acao":"criar_compromisso","titulo":"...","data":"AAAA-MM-DD","hora":"HH:MM ou vazio","local":"opcional"}<<FIM_ACAO>>
 - Criar processo judicial: <<ACAO>>{"acao":"criar_processo","clienteNome":"nome do cliente já cadastrado","numero":"opcional","assunto":"opcional","prazo":"AAAA-MM-DD opcional","prazoAto":"opcional"}<<FIM_ACAO>>
-- Criar sindicância: <<ACAO>>{"acao":"criar_sindicancia","clienteNome":"...","numero":"opcional","assunto":"opcional","prazo":"AAAA-MM-DD opcional"}<<FIM_ACAO>>
-- Criar PEP: <<ACAO>>{"acao":"criar_pep","clienteNome":"...","numero":"opcional","assunto":"opcional","prazo":"AAAA-MM-DD opcional"}<<FIM_ACAO>>
 - Concluir tarefa existente: <<ACAO>>{"acao":"concluir_tarefa","tituloTarefa":"parte do título da tarefa"}<<FIM_ACAO>>
-Hoje é ${fmtDataHoje()}. Use essa data como referência para calcular datas relativas ("amanhã", "sexta-feira", etc.). Para criar processo/sindicância/PEP, o cliente precisa já existir ou ser criado no mesmo pedido (nesse caso inclua o bloco de criar_cliente ANTES do bloco do processo). Inclua blocos <<ACAO>> apenas quando o pedido for claramente para criar/alterar algo, e escreva uma frase curta de confirmação junto. Se não for um pedido de ação, responda normalmente, sem nenhum bloco <<ACAO>>.`;
+Hoje é ${fmtDataHoje()}. Use essa data como referência para calcular datas relativas ("amanhã", "sexta-feira", etc.). Para criar processo, o cliente precisa já existir ou ser criado no mesmo pedido (nesse caso inclua o bloco de criar_cliente ANTES do bloco do processo). Inclua blocos <<ACAO>> apenas quando o pedido for claramente para criar/alterar algo, e escreva uma frase curta de confirmação junto. Se não for um pedido de ação, responda normalmente, sem nenhum bloco <<ACAO>>.`;
     try{
       const {texto,fontes} = await chamarIA(systemPrompt, perguntaIA.trim(), comBuscaIA);
       const matches = [...texto.matchAll(/<<ACAO>>([\s\S]*?)<<FIM_ACAO>>/g)];
@@ -724,8 +709,6 @@ Hoje é ${fmtDataHoje()}. Use essa data como referência para calcular datas rel
       <div style={{fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:.4,color:"var(--text2)",marginBottom:8,marginTop:8}}>Prazos por categoria</div>
       <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:26}}>
         <CaixaPrazo titulo="Processos" resumo={resumoProcessos} cor="var(--navy)" icon="processos" pagina="processos" regra="dias úteis"/>
-        <CaixaPrazo titulo="Sindicâncias" resumo={resumoSindicancias} cor="var(--gold-dark)" icon="escudo" pagina="sindicancias" regra="dias corridos"/>
-        <CaixaPrazo titulo="PEP" resumo={resumoPeps} cor="var(--gold-dark)" icon="balanca" pagina="peps" regra="dias corridos"/>
       </div>
 
       <div style={{background:"linear-gradient(135deg, var(--navy) 0%, var(--navy2) 100%)",borderRadius:12,padding:"20px 22px",marginBottom:22,boxShadow:"var(--shadow)"}}>
@@ -949,27 +932,13 @@ function PaginaClientes({clientes,setClientes,processos,onAbrirProcesso}){
 
 const CLASSIFICACOES_PADRAO = ["Responsabilidade Civil Médica","Ética Médica (CFM/CRM)","Contrato de Prestação de Serviços Médicos","Erro Médico","Consultivo","Cível Geral","Outro"];
 
-// Conjuntos de textos reutilizados pelas telas de Processos, Sindicâncias e PEP
+// Conjunto de textos reutilizado pela tela de Processos
 const LABELS_PROCESSO = {
   tituloPagina: "Processos", contagem:"processo(s)", novo:"Novo processo", editar:"Editar processo",
   numero:"Número do processo", numeroPlaceholder:"0000000-00.0000.0.00.0000", semNumero:"Processo sem número",
   excluirTitulo:"Excluir processo", excluirTexto:"Tem certeza que deseja excluir este processo? Esta ação não pode ser desfeita.",
   buscaPlaceholder:"Buscar por número, parte, assunto...", vazio:"Nenhum processo encontrado.",
   clienteLabel:"Cliente do escritório neste processo", mostrarDataJud:true, diasUteis:true,
-};
-const LABELS_SINDICANCIA = {
-  tituloPagina: "Sindicâncias", contagem:"sindicância(s)", novo:"Nova sindicância", editar:"Editar sindicância",
-  numero:"Número da sindicância", numeroPlaceholder:"Ex: SIND-0001/2026", semNumero:"Sindicância sem número",
-  excluirTitulo:"Excluir sindicância", excluirTexto:"Tem certeza que deseja excluir esta sindicância? Esta ação não pode ser desfeita.",
-  buscaPlaceholder:"Buscar por número, parte, assunto...", vazio:"Nenhuma sindicância encontrada.",
-  clienteLabel:"Médico(a) representado(a) nesta sindicância", mostrarDataJud:false, diasUteis:false,
-};
-const LABELS_PEP = {
-  tituloPagina: "PEP", contagem:"PEP(s)", novo:"Novo PEP", editar:"Editar PEP",
-  numero:"Número do PEP", numeroPlaceholder:"Ex: PEP-0001/2026", semNumero:"PEP sem número",
-  excluirTitulo:"Excluir PEP", excluirTexto:"Tem certeza que deseja excluir este PEP? Esta ação não pode ser desfeita.",
-  buscaPlaceholder:"Buscar por número, parte, assunto...", vazio:"Nenhum PEP encontrado.",
-  clienteLabel:"Médico(a) representado(a) neste PEP", mostrarDataJud:false, diasUteis:false,
 };
 
 // ---------- Modal: Formulário de Processo ----------
@@ -1846,8 +1815,6 @@ const TIPOS_PECA = [
 // ---------- Timbrado: abre a peça formatada com o papel timbrado do escritório ----------
 // ---------- Documentos: tipos disponíveis e motor de geração de .docx a partir de modelo ----------
 const TIPOS_DOCUMENTO = [
-  {id:"procuracao_pep", nome:"Procuração para PEP", colecao:"peps", tokenNumero:"{{NUMERO_PEP}}"},
-  {id:"procuracao_sindicancia", nome:"Procuração para Sindicância", colecao:"sindicancias", tokenNumero:"{{NUMERO_SINDICANCIA}}"},
   {id:"procuracao_ad_judicia", nome:"Procuração AD Judicia", colecao:"processos", tokenNumero:"{{NUMERO_PROCESSO}}"},
   {id:"contrato_honorarios", nome:"Contrato de Honorários Advocatícios", colecao:null, tokenNumero:null},
 ];
@@ -1872,8 +1839,6 @@ function montarSubstituicoes({cliente, itemVinculado, tipoDoc, config}){
     "{{OAB_UF}}": config?.oabUf || "",
     "{{DATA_EXTENSO}}": dataPorExtenso(),
     "{{NUMERO_PROCESSO}}": "",
-    "{{NUMERO_SINDICANCIA}}": "",
-    "{{NUMERO_PEP}}": "",
   };
   if(itemVinculado && tipoDoc?.tokenNumero){
     subst[tipoDoc.tokenNumero] = itemVinculado.numero || "";
@@ -2030,14 +1995,14 @@ async function chamarIA(systemPrompt, userContent, comBusca=false){
 }
 
 // ---------- Página: Documentos ----------
-function CartaoDocumento({tipo, modelo, onUpload, clientes, processos, sindicancias, peps, config}){
+function CartaoDocumento({tipo, modelo, onUpload, clientes, processos, config}){
   const [clienteId,setClienteId] = useState("");
   const [itemId,setItemId] = useState("");
   const [gerando,setGerando] = useState(false);
   const [erro,setErro] = useState("");
   const inputRef = useRef(null);
 
-  const listaVinculada = tipo.colecao==="peps"?peps : tipo.colecao==="sindicancias"?sindicancias : tipo.colecao==="processos"?processos : [];
+  const listaVinculada = tipo.colecao==="processos"?processos : [];
 
   const escolherArquivo = async (e) => {
     const file = e.target.files?.[0];
@@ -2117,7 +2082,7 @@ function CartaoDocumento({tipo, modelo, onUpload, clientes, processos, sindicanc
   );
 }
 
-function PaginaDocumentos({modelos,setModelos,clientes,processos,sindicancias,peps,config}){
+function PaginaDocumentos({modelos,setModelos,clientes,processos,config}){
   const salvarModelo = (tipoId, modelo) => {
     setModelos(prev=>({...prev, [tipoId]: modelo}));
   };
@@ -2142,8 +2107,6 @@ function PaginaDocumentos({modelos,setModelos,clientes,processos,sindicancias,pe
             onUpload={salvarModelo}
             clientes={clientes}
             processos={processos}
-            sindicancias={sindicancias}
-            peps={peps}
             config={config}
           />
         ))}
@@ -2366,8 +2329,6 @@ function AppPrincipal({usuario, onSair}){
 
   const [clientes,setClientes] = useState([]);
   const [processos,setProcessos] = useState([]);
-  const [sindicancias,setSindicancias] = useState([]);
-  const [peps,setPeps] = useState([]);
   const [tarefas,setTarefas] = useState([]);
   const [agenda,setAgenda] = useState([]);
   const [parcelas,setParcelas] = useState([]);
@@ -2381,8 +2342,6 @@ function AppPrincipal({usuario, onSair}){
     (async () => {
       setClientes(await stGet("clientes",[]));
       setProcessos(await stGet("processos",[]));
-      setSindicancias(await stGet("sindicancias",[]));
-      setPeps(await stGet("peps",[]));
       setTarefas(await stGet("tarefas",[]));
       setAgenda(await stGet("agenda",[]));
       setParcelas(await stGet("parcelas",[]));
@@ -2396,8 +2355,6 @@ function AppPrincipal({usuario, onSair}){
 
   useEffect(()=>{ if(carregado) stSet("clientes",clientes); },[clientes,carregado]);
   useEffect(()=>{ if(carregado) stSet("processos",processos); },[processos,carregado]);
-  useEffect(()=>{ if(carregado) stSet("sindicancias",sindicancias); },[sindicancias,carregado]);
-  useEffect(()=>{ if(carregado) stSet("peps",peps); },[peps,carregado]);
   useEffect(()=>{ if(carregado) stSet("tarefas",tarefas); },[tarefas,carregado]);
   useEffect(()=>{ if(carregado) stSet("agenda",agenda); },[agenda,carregado]);
   useEffect(()=>{ if(carregado) stSet("parcelas",parcelas); },[parcelas,carregado]);
@@ -2432,7 +2389,7 @@ function AppPrincipal({usuario, onSair}){
 
       // 1) DataJud: verifica movimentações processo a processo pelo número
       if(temDataJud){
-        const processosParaChecar = [...processos, ...sindicancias, ...peps].filter(p=>!p.arquivado && p.numero);
+        const processosParaChecar = processos.filter(p=>!p.arquivado && p.numero);
         for(const p of processosParaChecar){
           try{
             const encontrados = await buscarAndamentosDataJud(p.numero, config.datajudApiKey);
@@ -2440,10 +2397,7 @@ function AppPrincipal({usuario, onSair}){
             const novos = encontrados.filter(a=>!jaExistem.has(`${a.data}|${a.desc}`));
             if(novos.length>0){
               totalAndamentosDataJud += novos.length;
-              const atualizar = (ps)=>ps.map(x=>x.id===p.id?{...x,andamentos:[...(x.andamentos||[]),...novos]}:x);
-              setProcessos(ps=>ps.some(x=>x.id===p.id)?atualizar(ps):ps);
-              setSindicancias(ps=>ps.some(x=>x.id===p.id)?atualizar(ps):ps);
-              setPeps(ps=>ps.some(x=>x.id===p.id)?atualizar(ps):ps);
+              setProcessos(ps=>ps.map(x=>x.id===p.id?{...x,andamentos:[...(x.andamentos||[]),...novos]}:x));
             }
           }catch(e){ /* segue para o próximo processo mesmo se um falhar */ }
         }
@@ -2494,8 +2448,6 @@ function AppPrincipal({usuario, onSair}){
 
   const contadores = {
     processos: processos.filter(p=>!p.arquivado && p.prazo && calcularDiasPrazo(p.prazo,true)<=3).length,
-    sindicancias: sindicancias.filter(p=>!p.arquivado && p.prazo && calcularDiasPrazo(p.prazo,false)<=3).length,
-    peps: peps.filter(p=>!p.arquivado && p.prazo && calcularDiasPrazo(p.prazo,false)<=3).length,
     tarefas: tarefas.filter(t=>t.status!=="concluida" && !t.arquivada).length,
     intimacoes: intimacoes.filter(i=>!i.vinculada).length,
   };
@@ -2508,17 +2460,15 @@ function AppPrincipal({usuario, onSair}){
     <div style={{display:"flex",minHeight:"100vh"}}>
       <Sidebar paginaAtual={pagina} onIrPara={(p)=>{setPagina(p);setAbrirProcessoId(null);}} usuario={usuario} onSair={onSair} contadores={contadores}/>
       <div style={{flex:1,padding:"28px 34px",maxWidth:"100%",overflowX:"hidden"}}>
-        {pagina==="dashboard" && <PaginaDashboard processos={processos} setProcessos={setProcessos} sindicancias={sindicancias} setSindicancias={setSindicancias} peps={peps} setPeps={setPeps} clientes={clientes} setClientes={setClientes} tarefas={tarefas} setTarefas={setTarefas} agenda={agenda} setAgenda={setAgenda} parcelas={parcelas} onIrPara={setPagina} onAbrirProcesso={irParaProcesso}/>}
+        {pagina==="dashboard" && <PaginaDashboard processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} tarefas={tarefas} setTarefas={setTarefas} agenda={agenda} setAgenda={setAgenda} parcelas={parcelas} onIrPara={setPagina} onAbrirProcesso={irParaProcesso}/>}
         {pagina==="processos" && <PaginaProcessos processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} abrirProcessoId={abrirProcessoId} onProcessoAberto={()=>setAbrirProcessoId(null)} datajudApiKey={config.datajudApiKey} oabNumero={config.oabNumero} oabUf={config.oabUf}/>}
-        {pagina==="sindicancias" && <PaginaProcessos processos={sindicancias} setProcessos={setSindicancias} clientes={clientes} setClientes={setClientes} datajudApiKey={config.datajudApiKey} labels={LABELS_SINDICANCIA}/>}
-        {pagina==="peps" && <PaginaProcessos processos={peps} setProcessos={setPeps} clientes={clientes} setClientes={setClientes} datajudApiKey={config.datajudApiKey} labels={LABELS_PEP}/>}
         {pagina==="clientes" && <PaginaClientes clientes={clientes} setClientes={setClientes} processos={processos} onAbrirProcesso={irParaProcesso}/>}
         {pagina==="tarefas" && <PaginaTarefas tarefas={tarefas} setTarefas={setTarefas} processos={processos} clientes={clientes}/>}
         {pagina==="agenda" && <PaginaAgenda agenda={agenda} setAgenda={setAgenda} processos={processos} clientes={clientes} googleToken={googleToken}/>}
         {pagina==="intimacoes" && <PaginaIntimacoes intimacoes={intimacoes} setIntimacoes={setIntimacoes} processos={processos} setProcessos={setProcessos} oabNumero={config.oabNumero} oabUf={config.oabUf} onAbrirProcesso={irParaProcesso}/>}
         {pagina==="financeiro" && <PaginaFinanceiro parcelas={parcelas} setParcelas={setParcelas} despesas={despesas} setDespesas={setDespesas} processos={processos} clientes={clientes}/>}
         {pagina==="pecas" && <PaginaPecas processos={processos} clientes={clientes}/>}
-        {pagina==="documentos" && <PaginaDocumentos modelos={modelos} setModelos={setModelos} clientes={clientes} processos={processos} sindicancias={sindicancias} peps={peps} config={config}/>}
+        {pagina==="documentos" && <PaginaDocumentos modelos={modelos} setModelos={setModelos} clientes={clientes} processos={processos} config={config}/>}
         {pagina==="config" && <PaginaConfig usuario={usuario} config={config} setConfig={setConfig} googleToken={googleToken} onConectarGoogle={conectarGoogle}/>}
       </div>
       {statusSincDataJud && (
