@@ -2415,33 +2415,80 @@ function AppPrincipal({usuario, onSair}){
   const [statusSincDataJud, setStatusSincDataJud] = useState(null);
 
   useEffect(()=>{
-    if(!carregado || !config.datajudApiKey) return;
+    if(!carregado) return;
+    const temDataJud = !!config.datajudApiKey;
+    const temDJEN = !!(config.oabNumero && config.oabUf);
+    if(!temDataJud && !temDJEN) return;
     (async () => {
       const hoje = fmtDataHoje();
-      const ultimaSinc = await stGet("datajudUltimaSincronizacao", null);
+      const ultimaSinc = await stGet("verificacaoDiariaUltima", null);
       if(ultimaSinc === hoje) return;
 
-      const processosParaChecar = processos.filter(p=>!p.arquivado && p.numero);
-      if(processosParaChecar.length===0){ await stSet("datajudUltimaSincronizacao", hoje); return; }
-
       setStatusSincDataJud("sincronizando");
-      let totalNovos = 0;
-      for(const p of processosParaChecar){
-        try{
-          const encontrados = await buscarAndamentosDataJud(p.numero, config.datajudApiKey);
-          const jaExistem = new Set((p.andamentos||[]).map(a=>`${a.data}|${a.desc}`));
-          const novos = encontrados.filter(a=>!jaExistem.has(`${a.data}|${a.desc}`));
-          if(novos.length>0){
-            totalNovos += novos.length;
-            setProcessos(ps=>ps.map(x=>x.id===p.id?{...x,andamentos:[...(x.andamentos||[]),...novos]}:x));
-          }
-        }catch(e){ /* segue para o próximo processo mesmo se um falhar */ }
+      let totalAndamentosDataJud = 0;
+      let totalMovimentacoesDJEN = 0;
+      const processosAtualizadosDJEN = new Set();
+      let intimacoesPendentesNovas = 0;
+
+      // 1) DataJud: verifica movimentações processo a processo pelo número
+      if(temDataJud){
+        const processosParaChecar = [...processos, ...sindicancias, ...peps].filter(p=>!p.arquivado && p.numero);
+        for(const p of processosParaChecar){
+          try{
+            const encontrados = await buscarAndamentosDataJud(p.numero, config.datajudApiKey);
+            const jaExistem = new Set((p.andamentos||[]).map(a=>`${a.data}|${a.desc}`));
+            const novos = encontrados.filter(a=>!jaExistem.has(`${a.data}|${a.desc}`));
+            if(novos.length>0){
+              totalAndamentosDataJud += novos.length;
+              const atualizar = (ps)=>ps.map(x=>x.id===p.id?{...x,andamentos:[...(x.andamentos||[]),...novos]}:x);
+              setProcessos(ps=>ps.some(x=>x.id===p.id)?atualizar(ps):ps);
+              setSindicancias(ps=>ps.some(x=>x.id===p.id)?atualizar(ps):ps);
+              setPeps(ps=>ps.some(x=>x.id===p.id)?atualizar(ps):ps);
+            }
+          }catch(e){ /* segue para o próximo processo mesmo se um falhar */ }
+        }
       }
-      await stSet("datajudUltimaSincronizacao", hoje);
-      setStatusSincDataJud({novos: totalNovos});
-      setTimeout(()=>setStatusSincDataJud(null), 7000);
+
+      // 2) DJEN: verifica publicações novas pela OAB e casa com processos cadastrados
+      if(temDJEN){
+        try{
+          const encontradas = await buscarIntimacoesDJEN({oabNumero:config.oabNumero, oabUf:config.oabUf, dias:7});
+          const jaTemIds = new Set(intimacoes.map(i=>i.id));
+          const novasBrutas = encontradas.filter(i=>!jaTemIds.has(i.id));
+          const proxProcessos = processos.map(p=>({...p, andamentos:[...(p.andamentos||[])]}));
+          const paraIntimacoes = [];
+          novasBrutas.forEach(it=>{
+            const numLimpo = (it.numeroProcesso||"").replace(/\D/g,"");
+            const proc = numLimpo ? proxProcessos.find(p=>(p.numero||"").replace(/\D/g,"")===numLimpo) : null;
+            if(proc){
+              const desc = `Publicação DJEN: ${(it.texto||"").slice(0,200)||"—"}`;
+              const jaExiste = proc.andamentos.some(a=>a.desc===desc && a.data===it.data);
+              if(!jaExiste){
+                proc.andamentos.push({data: it.data||fmtDataHoje(), desc, fonte:"djen"});
+                totalMovimentacoesDJEN++;
+                processosAtualizadosDJEN.add(proc.id);
+              }
+              paraIntimacoes.push({...it, vinculada:true, processoId:proc.id});
+            } else {
+              intimacoesPendentesNovas++;
+              paraIntimacoes.push(it);
+            }
+          });
+          if(totalMovimentacoesDJEN>0) setProcessos(proxProcessos);
+          if(paraIntimacoes.length>0) setIntimacoes(prev=>[...paraIntimacoes,...prev]);
+        }catch(e){ /* segue mesmo se o DJEN falhar */ }
+      }
+
+      await stSet("verificacaoDiariaUltima", hoje);
+      setStatusSincDataJud({
+        andamentosDataJud: totalAndamentosDataJud,
+        movimentacoesDJEN: totalMovimentacoesDJEN,
+        processosAtualizadosDJEN: processosAtualizadosDJEN.size,
+        intimacoesPendentesNovas,
+      });
+      setTimeout(()=>setStatusSincDataJud(null), 9000);
     })();
-  },[carregado, config.datajudApiKey]);
+  },[carregado, config.datajudApiKey, config.oabNumero, config.oabUf]);
 
   const irParaProcesso = (id) => { setPagina("processos"); setAbrirProcessoId(id); };
 
@@ -2478,14 +2525,18 @@ function AppPrincipal({usuario, onSair}){
         <div style={{
           position:"fixed", bottom:20, right:20, zIndex:200,
           background:"var(--navy)", color:"#fff", borderRadius:10, padding:"12px 18px",
-          boxShadow:"var(--shadow-lg)", display:"flex", alignItems:"center", gap:10, fontSize:13.5, maxWidth:320
+          boxShadow:"var(--shadow-lg)", display:"flex", alignItems:"center", gap:10, fontSize:13.5, maxWidth:340
         }}>
           <Icon name="sync" size={16} color="var(--gold-light)"/>
           {statusSincDataJud==="sincronizando"
-            ? "Sincronizando processos com o DataJud…"
-            : statusSincDataJud.novos>0
-              ? `${statusSincDataJud.novos} andamento(s) novo(s) encontrado(s) no DataJud hoje.`
-              : "Processos verificados no DataJud — nenhuma novidade hoje."}
+            ? "Verificando publicações e movimentações dos processos…"
+            : (() => {
+                const partes = [];
+                if(statusSincDataJud.andamentosDataJud>0) partes.push(`${statusSincDataJud.andamentosDataJud} andamento(s) novo(s) no DataJud`);
+                if(statusSincDataJud.movimentacoesDJEN>0) partes.push(`${statusSincDataJud.movimentacoesDJEN} movimentação(ões) via DJEN em ${statusSincDataJud.processosAtualizadosDJEN} processo(s)`);
+                if(statusSincDataJud.intimacoesPendentesNovas>0) partes.push(`${statusSincDataJud.intimacoesPendentesNovas} publicação(ões) nova(s) sem processo correspondente (confira em Intimações)`);
+                return partes.length>0 ? `${partes.join(". ")}.` : "Verificação diária concluída — nenhuma novidade hoje.";
+              })()}
         </div>
       )}
     </div>
