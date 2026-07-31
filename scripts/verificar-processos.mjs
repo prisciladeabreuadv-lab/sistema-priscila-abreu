@@ -99,4 +99,150 @@ async function buscarIntimacoesDJEN({ oabNumero, oabUf, dias = 7 }) {
     id: it.id || `${Date.now()}${Math.random().toString(36).slice(2, 8)}`,
     data: (it.data_disponibilizacao || it.dataDisponibilizacao || "").slice(0, 10),
     orgao: it.orgao?.nome || it.nomeOrgao || "—",
-    numeroProcesso: it.numero_processo ||
+    numeroProcesso: it.numero_processo || it.numeroProcesso || "",
+    texto: it.texto || it.conteudo || "",
+    vinculada: false,
+  }));
+}
+
+// ---------- Acesso à tabela dados_sistema via REST (PostgREST) ----------
+async function pegarLinha(chave) {
+  const url = `${REST}/dados_sistema?chave=eq.${encodeURIComponent(chave)}&select=user_id,valor&limit=1`;
+  const resp = await fetch(url, { headers: HEADERS });
+  if (!resp.ok) throw new Error(`Falha ao ler '${chave}': ${resp.status} ${await resp.text()}`);
+  const rows = await resp.json();
+  return rows[0] || null;
+}
+
+async function salvarLinha(userId, chave, valor) {
+  const url = `${REST}/dados_sistema?on_conflict=user_id,chave`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { ...HEADERS, Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify([{ user_id: userId, chave, valor, atualizado_em: new Date().toISOString() }]),
+  });
+  if (!resp.ok) throw new Error(`Falha ao salvar '${chave}': ${resp.status} ${await resp.text()}`);
+}
+
+// ---------- Rotina principal ----------
+async function main() {
+  const configRow = await pegarLinha("config");
+  if (!configRow) {
+    console.log("Nenhuma configuração encontrada no banco ainda — o sistema precisa ser usado/configurado ao menos uma vez. Encerrando sem erro.");
+    return;
+  }
+
+  const userId = configRow.user_id;
+  const config = configRow.valor || {};
+  const temDataJud = !!config.datajudApiKey;
+  const temDJEN = !!(config.oabNumero && config.oabUf);
+
+  if (!temDataJud && !temDJEN) {
+    console.log("DataJud e DJEN não estão configurados em Configurações. Nada a verificar hoje.");
+    return;
+  }
+
+  const processosRow = await pegarLinha("processos");
+  let processos = processosRow?.valor || [];
+
+  const intimacoesRow = await pegarLinha("intimacoes");
+  let intimacoes = intimacoesRow?.valor || [];
+
+  let totalAndamentosDataJud = 0;
+  let totalMovimentacoesDJEN = 0;
+  const processosAtualizadosDJEN = new Set();
+  let processosCriadosDJEN = 0;
+  let intimacoesPendentesNovas = 0;
+
+  // 1) DataJud: processo a processo, pelo número
+  if (temDataJud) {
+    for (const p of processos) {
+      if (p.arquivado || !p.numero) continue;
+      try {
+        const encontrados = await buscarAndamentosDataJud(p.numero, config.datajudApiKey);
+        const jaExistem = new Set((p.andamentos || []).map((a) => `${a.data}|${a.desc}`));
+        const novos = encontrados.filter((a) => !jaExistem.has(`${a.data}|${a.desc}`));
+        if (novos.length > 0) {
+          p.andamentos = [...(p.andamentos || []), ...novos];
+          totalAndamentosDataJud += novos.length;
+        }
+      } catch (e) {
+        console.error(`Erro DataJud no processo ${p.numero}:`, e.message);
+      }
+    }
+  }
+
+  // 2) DJEN: publicações recentes pela OAB — casa com processos cadastrados pelo número e,
+  // quando a publicação traz um número de processo ainda não cadastrado, cria o processo
+  // automaticamente (sem cliente vinculado, para revisão e complementação depois).
+  if (temDJEN) {
+    try {
+      const encontradas = await buscarIntimacoesDJEN({ oabNumero: config.oabNumero, oabUf: config.oabUf, dias: 7 });
+      const jaTemIds = new Set(intimacoes.map((i) => i.id));
+      const novasBrutas = encontradas.filter((i) => !jaTemIds.has(i.id));
+      const paraIntimacoes = [];
+      novasBrutas.forEach((it) => {
+        const numLimpo = (it.numeroProcesso || "").replace(/\D/g, "");
+        let proc = numLimpo ? processos.find((p) => (p.numero || "").replace(/\D/g, "") === numLimpo) : null;
+
+        if (!proc && numLimpo) {
+          proc = {
+            id: uid(),
+            numero: it.numeroProcesso || "",
+            clienteId: "",
+            sistema: "PJe",
+            classificacao: "",
+            vara: it.orgao || "",
+            autor: "",
+            reu: "",
+            assunto: "",
+            valorCausa: "",
+            prazo: "",
+            prazoAto: "",
+            obs: "Processo cadastrado automaticamente a partir de uma publicação do DJEN. Confira e complete os dados (cliente, partes, assunto).",
+            arquivado: false,
+            andamentos: [],
+          };
+          processos.push(proc);
+          processosCriadosDJEN++;
+        }
+
+        if (proc) {
+          const desc = `Publicação DJEN: ${(it.texto || "").slice(0, 200) || "—"}`;
+          const jaExiste = (proc.andamentos || []).some((a) => a.desc === desc && a.data === it.data);
+          if (!jaExiste) {
+            proc.andamentos = [...(proc.andamentos || []), { data: it.data || fmtDataHoje(), desc, fonte: "djen" }];
+            totalMovimentacoesDJEN++;
+            processosAtualizadosDJEN.add(proc.id);
+          }
+          paraIntimacoes.push({ ...it, vinculada: true, processoId: proc.id });
+        } else {
+          intimacoesPendentesNovas++;
+          paraIntimacoes.push(it);
+        }
+      });
+      if (paraIntimacoes.length > 0) intimacoes = [...paraIntimacoes, ...intimacoes];
+    } catch (e) {
+      console.error("Erro DJEN:", e.message);
+    }
+  }
+
+  if (totalAndamentosDataJud > 0 || totalMovimentacoesDJEN > 0 || processosCriadosDJEN > 0) {
+    await salvarLinha(userId, "processos", processos);
+  }
+  if (intimacoesPendentesNovas > 0 || totalMovimentacoesDJEN > 0) {
+    await salvarLinha(userId, "intimacoes", intimacoes);
+  }
+
+  console.log(
+    `Verificação concluída: ${totalAndamentosDataJud} andamento(s) novo(s) via DataJud; ` +
+    `${totalMovimentacoesDJEN} movimentação(ões) via DJEN em ${processosAtualizadosDJEN.size} processo(s); ` +
+    `${processosCriadosDJEN} processo(s) novo(s) cadastrado(s) automaticamente; ` +
+    `${intimacoesPendentesNovas} publicação(ões) sem número de processo identificável.`
+  );
+}
+
+main().catch((e) => {
+  console.error("Falha na verificação diária:", e);
+  process.exit(1);
+});
