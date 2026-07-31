@@ -246,6 +246,71 @@ async function buscarIntimacoesDJEN({oabNumero, oabUf, dias=15}){
   }));
 }
 
+// Casa publicações do DJEN com os processos já cadastrados (pelo número) e, quando uma
+// publicação traz um número de processo que ainda não existe no sistema, cadastra esse
+// processo automaticamente (sem cliente vinculado, para revisão e complementação depois).
+function processarPublicacoesDJEN(encontradas, processosBase, intimacoesBase){
+  const jaTemIds = new Set(intimacoesBase.map(i=>i.id));
+  const novasBrutas = encontradas.filter(i=>!jaTemIds.has(i.id));
+  const proxProcessos = processosBase.map(p=>({...p, andamentos:[...(p.andamentos||[])]}));
+  const paraIntimacoes = [];
+  let movimentacoesNovas = 0;
+  let processosCriados = 0;
+  const processosAtualizadosIds = new Set();
+
+  novasBrutas.forEach(it=>{
+    const numLimpo = (it.numeroProcesso||"").replace(/\D/g,"");
+    let proc = numLimpo ? proxProcessos.find(p=>(p.numero||"").replace(/\D/g,"")===numLimpo) : null;
+
+    if(!proc && numLimpo){
+      proc = {
+        id: uid(),
+        numero: it.numeroProcesso || "",
+        clienteId: "",
+        sistema: "PJe",
+        classificacao: "",
+        vara: it.orgao || "",
+        autor: "",
+        reu: "",
+        assunto: "",
+        valorCausa: "",
+        prazo: "",
+        prazoAto: "",
+        obs: "Processo cadastrado automaticamente a partir de uma publicação do DJEN. Confira e complete os dados (cliente, partes, assunto).",
+        arquivado: false,
+        andamentos: [],
+      };
+      proxProcessos.push(proc);
+      processosCriados++;
+    }
+
+    if(proc){
+      const desc = `Publicação DJEN: ${(it.texto||"").slice(0,200)||"—"}`;
+      const jaExiste = proc.andamentos.some(a=>a.desc===desc && a.data===it.data);
+      if(!jaExiste){
+        proc.andamentos.push({data: it.data||fmtDataHoje(), desc, fonte:"djen"});
+        movimentacoesNovas++;
+        processosAtualizadosIds.add(proc.id);
+      }
+      paraIntimacoes.push({...it, vinculada:true, processoId:proc.id});
+    } else {
+      paraIntimacoes.push(it);
+    }
+  });
+
+  return {
+    processos: proxProcessos,
+    intimacoes: paraIntimacoes.length>0 ? [...paraIntimacoes, ...intimacoesBase] : intimacoesBase,
+    resumo: {
+      totalPublicacoes: encontradas.length,
+      movimentacoesNovas,
+      processosAtualizados: processosAtualizadosIds.size,
+      processosCriados,
+      pendentesSemNumero: paraIntimacoes.filter(i=>!i.vinculada).length,
+    }
+  };
+}
+
 // ---------- Integração: Google Agenda ----------
 function inicializarGoogle(clientId, onToken){
   if(!clientId || !window.google?.accounts?.oauth2) return null;
@@ -1145,7 +1210,7 @@ function ModalDetalheProcesso({p,cliente,onClose,onEdit,onExcluir,onAddAndamento
 }
 
 // ---------- Página: Processos ----------
-function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProcessoId,onProcessoAberto,datajudApiKey,oabNumero,oabUf,labels=LABELS_PROCESSO}){
+function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProcessoId,onProcessoAberto,datajudApiKey,oabNumero,oabUf,intimacoes,setIntimacoes,labels=LABELS_PROCESSO}){
   const [busca,setBusca] = useState("");
   const [filtroStatus,setFiltroStatus] = useState("ativos");
   const [novo,setNovo] = useState(false);
@@ -1161,24 +1226,10 @@ function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProce
     setBuscandoOAB(true);
     try{
       const encontradas = await buscarIntimacoesDJEN({oabNumero, oabUf, dias:30});
-      const idsAtualizados = new Set();
-      let movimentacoesNovas = 0;
-      let semCorrespondencia = 0;
-      const proxProcessos = processos.map(p=>({...p, andamentos:[...(p.andamentos||[])]}));
-      encontradas.forEach(it=>{
-        const numLimpo = (it.numeroProcesso||"").replace(/\D/g,"");
-        if(!numLimpo){ semCorrespondencia++; return; }
-        const proc = proxProcessos.find(p=>(p.numero||"").replace(/\D/g,"")===numLimpo);
-        if(!proc){ semCorrespondencia++; return; }
-        const desc = `Publicação DJEN: ${(it.texto||"").slice(0,200)||"—"}`;
-        const jaExiste = proc.andamentos.some(a=>a.desc===desc && a.data===it.data);
-        if(jaExiste) return;
-        proc.andamentos.push({data: it.data||fmtDataHoje(), desc, fonte:"djen"});
-        movimentacoesNovas++;
-        idsAtualizados.add(proc.id);
-      });
-      setProcessos(proxProcessos);
-      setResultadoOAB({total: encontradas.length, processosAtualizados: idsAtualizados.size, movimentacoesNovas, semCorrespondencia});
+      const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = processarPublicacoesDJEN(encontradas, processos, intimacoes);
+      setProcessos(novosProcessos);
+      setIntimacoes(novasIntimacoes);
+      setResultadoOAB(resumo);
     }catch(e){ setErroOAB(e.message||"Erro ao consultar publicações pela OAB."); }
     setBuscandoOAB(false);
   };
@@ -1237,7 +1288,7 @@ function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProce
         <div style={{marginBottom:16,padding:"12px 16px",borderRadius:8,fontSize:13.5,
           background: erroOAB?"rgba(166,66,58,0.1)":"rgba(62,107,79,0.1)",
           color: erroOAB?"var(--red)":"var(--green)"}}>
-          {erroOAB || `${resultadoOAB.processosAtualizados} processo(s) atualizado(s) com ${resultadoOAB.movimentacoesNovas} movimentação(ões) nova(s), a partir de ${resultadoOAB.total} publicação(ões) encontrada(s) para a OAB.${resultadoOAB.semCorrespondencia>0?` ${resultadoOAB.semCorrespondencia} publicação(ões) não corresponderam a nenhum processo cadastrado — confira na aba Intimações.`:""}`}
+          {erroOAB || `${resultadoOAB.processosAtualizados} processo(s) atualizado(s) com ${resultadoOAB.movimentacoesNovas} movimentação(ões) nova(s)${resultadoOAB.processosCriados>0?`, ${resultadoOAB.processosCriados} processo(s) novo(s) cadastrado(s) automaticamente`:""}, a partir de ${resultadoOAB.totalPublicacoes} publicação(ões) encontrada(s) para a OAB.${resultadoOAB.pendentesSemNumero>0?` ${resultadoOAB.pendentesSemNumero} publicação(ões) sem número de processo identificável — confira na aba Intimações.`:""}`}
         </div>
       )}
 
@@ -1561,17 +1612,26 @@ function PaginaAgenda({agenda,setAgenda,processos,clientes,googleToken}){
 function PaginaIntimacoes({intimacoes,setIntimacoes,processos,setProcessos,oabNumero,oabUf,onAbrirProcesso}){
   const [buscando,setBuscando] = useState(false);
   const [erro,setErro] = useState("");
+  const [resultado,setResultado] = useState("");
   const [vinculandoId,setVinculandoId] = useState(null);
   const [criarPrazoDe,setCriarPrazoDe] = useState(null);
 
   const buscar = async () => {
-    setErro(""); setBuscando(true);
+    setErro(""); setResultado(""); setBuscando(true);
     try{
       const encontradas = await buscarIntimacoesDJEN({oabNumero,oabUf,dias:15});
-      const jaTemIds = new Set(intimacoes.map(i=>i.id));
-      const novas = encontradas.filter(i=>!jaTemIds.has(i.id));
-      setIntimacoes(prev=>[...novas,...prev]);
-      if(novas.length===0 && encontradas.length===0) setErro("Nenhuma publicação encontrada nos últimos 15 dias para esta OAB.");
+      const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = processarPublicacoesDJEN(encontradas, processos, intimacoes);
+      setProcessos(novosProcessos);
+      setIntimacoes(novasIntimacoes);
+      if(resumo.totalPublicacoes===0){
+        setErro("Nenhuma publicação encontrada nos últimos 15 dias para esta OAB.");
+      }else{
+        const partes = [];
+        if(resumo.movimentacoesNovas>0) partes.push(`${resumo.movimentacoesNovas} movimentação(ões) adicionada(s) em ${resumo.processosAtualizados} processo(s)`);
+        if(resumo.processosCriados>0) partes.push(`${resumo.processosCriados} processo(s) novo(s) cadastrado(s) automaticamente`);
+        if(resumo.pendentesSemNumero>0) partes.push(`${resumo.pendentesSemNumero} publicação(ões) sem número de processo identificável, pendente(s) de vínculo manual abaixo`);
+        setResultado(partes.length>0 ? partes.join(". ")+"." : "Nenhuma publicação nova encontrada.");
+      }
     }catch(e){ setErro(e.message||"Erro ao consultar o DJEN."); }
     setBuscando(false);
   };
@@ -1603,6 +1663,7 @@ function PaginaIntimacoes({intimacoes,setIntimacoes,processos,setProcessos,oabNu
         </div>
       )}
       {erro && <div style={{color:"var(--red)",fontSize:14,marginBottom:14}}>{erro}</div>}
+      {resultado && <div style={{color:"var(--green)",fontSize:14,marginBottom:14}}>{resultado}</div>}
 
       <div style={{background:"var(--card)",borderRadius:12,boxShadow:"var(--shadow)",border:"1px solid var(--border)",overflow:"hidden"}}>
         {intimacoes.length===0 && <div style={{padding:30,textAlign:"center",color:"var(--text3)"}}>Nenhuma intimação carregada ainda.</div>}
@@ -2387,7 +2448,8 @@ function AppPrincipal({usuario, onSair}){
       setStatusSincDataJud("sincronizando");
       let totalAndamentosDataJud = 0;
       let totalMovimentacoesDJEN = 0;
-      const processosAtualizadosDJEN = new Set();
+      let processosAtualizadosDJEN = 0;
+      let processosCriadosDJEN = 0;
       let intimacoesPendentesNovas = 0;
 
       // 1) DataJud: verifica movimentações processo a processo pelo número
@@ -2406,33 +2468,18 @@ function AppPrincipal({usuario, onSair}){
         }
       }
 
-      // 2) DJEN: verifica publicações novas pela OAB e casa com processos cadastrados
+      // 2) DJEN: verifica publicações novas pela OAB, casa com processos cadastrados e
+      // cadastra automaticamente um processo novo quando a publicação traz um número inédito
       if(temDJEN){
         try{
           const encontradas = await buscarIntimacoesDJEN({oabNumero:config.oabNumero, oabUf:config.oabUf, dias:7});
-          const jaTemIds = new Set(intimacoes.map(i=>i.id));
-          const novasBrutas = encontradas.filter(i=>!jaTemIds.has(i.id));
-          const proxProcessos = processos.map(p=>({...p, andamentos:[...(p.andamentos||[])]}));
-          const paraIntimacoes = [];
-          novasBrutas.forEach(it=>{
-            const numLimpo = (it.numeroProcesso||"").replace(/\D/g,"");
-            const proc = numLimpo ? proxProcessos.find(p=>(p.numero||"").replace(/\D/g,"")===numLimpo) : null;
-            if(proc){
-              const desc = `Publicação DJEN: ${(it.texto||"").slice(0,200)||"—"}`;
-              const jaExiste = proc.andamentos.some(a=>a.desc===desc && a.data===it.data);
-              if(!jaExiste){
-                proc.andamentos.push({data: it.data||fmtDataHoje(), desc, fonte:"djen"});
-                totalMovimentacoesDJEN++;
-                processosAtualizadosDJEN.add(proc.id);
-              }
-              paraIntimacoes.push({...it, vinculada:true, processoId:proc.id});
-            } else {
-              intimacoesPendentesNovas++;
-              paraIntimacoes.push(it);
-            }
-          });
-          if(totalMovimentacoesDJEN>0) setProcessos(proxProcessos);
-          if(paraIntimacoes.length>0) setIntimacoes(prev=>[...paraIntimacoes,...prev]);
+          const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = processarPublicacoesDJEN(encontradas, processos, intimacoes);
+          if(resumo.movimentacoesNovas>0 || resumo.processosCriados>0) setProcessos(novosProcessos);
+          if(novasIntimacoes!==intimacoes) setIntimacoes(novasIntimacoes);
+          totalMovimentacoesDJEN = resumo.movimentacoesNovas;
+          processosAtualizadosDJEN = resumo.processosAtualizados;
+          processosCriadosDJEN = resumo.processosCriados;
+          intimacoesPendentesNovas = resumo.pendentesSemNumero;
         }catch(e){ /* segue mesmo se o DJEN falhar */ }
       }
 
@@ -2440,7 +2487,8 @@ function AppPrincipal({usuario, onSair}){
       setStatusSincDataJud({
         andamentosDataJud: totalAndamentosDataJud,
         movimentacoesDJEN: totalMovimentacoesDJEN,
-        processosAtualizadosDJEN: processosAtualizadosDJEN.size,
+        processosAtualizadosDJEN,
+        processosCriadosDJEN,
         intimacoesPendentesNovas,
       });
       setTimeout(()=>setStatusSincDataJud(null), 9000);
@@ -2464,7 +2512,7 @@ function AppPrincipal({usuario, onSair}){
       <Sidebar paginaAtual={pagina} onIrPara={(p)=>{setPagina(p);setAbrirProcessoId(null);}} usuario={usuario} onSair={onSair} contadores={contadores}/>
       <div style={{flex:1,padding:"28px 34px",maxWidth:"100%",overflowX:"hidden"}}>
         {pagina==="dashboard" && <PaginaDashboard processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} tarefas={tarefas} setTarefas={setTarefas} agenda={agenda} setAgenda={setAgenda} parcelas={parcelas} onIrPara={setPagina} onAbrirProcesso={irParaProcesso}/>}
-        {pagina==="processos" && <PaginaProcessos processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} abrirProcessoId={abrirProcessoId} onProcessoAberto={()=>setAbrirProcessoId(null)} datajudApiKey={config.datajudApiKey} oabNumero={config.oabNumero} oabUf={config.oabUf}/>}
+        {pagina==="processos" && <PaginaProcessos processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} abrirProcessoId={abrirProcessoId} onProcessoAberto={()=>setAbrirProcessoId(null)} datajudApiKey={config.datajudApiKey} oabNumero={config.oabNumero} oabUf={config.oabUf} intimacoes={intimacoes} setIntimacoes={setIntimacoes}/>}
         {pagina==="clientes" && <PaginaClientes clientes={clientes} setClientes={setClientes} processos={processos} onAbrirProcesso={irParaProcesso}/>}
         {pagina==="tarefas" && <PaginaTarefas tarefas={tarefas} setTarefas={setTarefas} processos={processos} clientes={clientes}/>}
         {pagina==="agenda" && <PaginaAgenda agenda={agenda} setAgenda={setAgenda} processos={processos} clientes={clientes} googleToken={googleToken}/>}
@@ -2487,7 +2535,8 @@ function AppPrincipal({usuario, onSair}){
                 const partes = [];
                 if(statusSincDataJud.andamentosDataJud>0) partes.push(`${statusSincDataJud.andamentosDataJud} andamento(s) novo(s) no DataJud`);
                 if(statusSincDataJud.movimentacoesDJEN>0) partes.push(`${statusSincDataJud.movimentacoesDJEN} movimentação(ões) via DJEN em ${statusSincDataJud.processosAtualizadosDJEN} processo(s)`);
-                if(statusSincDataJud.intimacoesPendentesNovas>0) partes.push(`${statusSincDataJud.intimacoesPendentesNovas} publicação(ões) nova(s) sem processo correspondente (confira em Intimações)`);
+                if(statusSincDataJud.processosCriadosDJEN>0) partes.push(`${statusSincDataJud.processosCriadosDJEN} processo(s) novo(s) cadastrado(s) automaticamente`);
+                if(statusSincDataJud.intimacoesPendentesNovas>0) partes.push(`${statusSincDataJud.intimacoesPendentesNovas} publicação(ões) sem número de processo identificável (confira em Intimações)`);
                 return partes.length>0 ? `${partes.join(". ")}.` : "Verificação diária concluída — nenhuma novidade hoje.";
               })()}
         </div>
