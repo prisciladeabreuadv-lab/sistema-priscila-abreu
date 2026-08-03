@@ -254,10 +254,50 @@ async function buscarIntimacoesDJEN({oabNumero, oabUf, dias=15}){
   }));
 }
 
+// Usa a IA para analisar se uma publicação exige a prática de algum ato com prazo, e sugerir
+// quantos dias e a descrição do ato. NUNCA cria o prazo sozinha — só sugere; a confirmação e
+// o registro do prazo de fato são sempre feitos manualmente pela usuária.
+async function analisarPublicacaoIA(texto){
+  const vazio = {temPrazo:false, diasPrazo:null, diasUteis:true, descricaoAto:"", confianca:"baixa"};
+  if(!texto || !texto.trim() || !supabaseConfigurado) return vazio;
+  try{
+    const systemPrompt = `Você é um assistente jurídico brasileiro especializado em Direito Civil e Direito Imobiliário. Você recebe o texto de uma publicação do Diário de Justiça Eletrônico Nacional (DJEN) e deve analisar SOMENTE se ela exige a prática de algum ato processual pela parte/advogado (ex: contestação, réplica, recurso, manifestação, cumprimento de decisão, emenda à inicial) com prazo em dias. Se for apenas informativa (mero andamento, decisão sem exigência de ato da parte, designação de audiência sem necessidade de manifestação prévia, etc.), considere que não há prazo. Responda APENAS com um JSON no formato exato, sem nenhum texto antes ou depois: {"temPrazo": true ou false, "diasPrazo": número ou null, "diasUteis": true ou false, "descricaoAto": "descrição curta do ato", "confianca": "alta" ou "media" ou "baixa"}. Use diasUteis:true salvo se o texto indicar prazo em dias corridos.`;
+    const {texto: resposta} = await chamarIA(systemPrompt, texto.slice(0,3000), false);
+    const jsonMatch = resposta.match(/\{[\s\S]*\}/);
+    if(!jsonMatch) return vazio;
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      temPrazo: !!parsed.temPrazo,
+      diasPrazo: typeof parsed.diasPrazo==="number" ? parsed.diasPrazo : null,
+      diasUteis: parsed.diasUteis!==false,
+      descricaoAto: parsed.descricaoAto || "",
+      confianca: parsed.confianca || "baixa",
+    };
+  }catch(e){ return vazio; }
+}
+
+// Soma N dias (úteis ou corridos) a partir de uma data-base ISO, para sugerir uma data de prazo.
+function adicionarDias(dataBaseISO, quantidade, diasUteis){
+  if(!dataBaseISO || !quantidade) return "";
+  let d = new Date(dataBaseISO+"T00:00:00");
+  let restantes = quantidade;
+  while(restantes>0){
+    d.setDate(d.getDate()+1);
+    if(diasUteis){
+      const diaSemana = d.getDay();
+      if(diaSemana===0 || diaSemana===6) continue;
+    }
+    restantes--;
+  }
+  return d.toISOString().slice(0,10);
+}
+
 // Casa publicações do DJEN com os processos já cadastrados (pelo número) e, quando uma
 // publicação traz um número de processo que ainda não existe no sistema, cadastra esse
 // processo automaticamente (sem cliente vinculado, para revisão e complementação depois).
-function processarPublicacoesDJEN(encontradas, processosBase, intimacoesBase){
+// Cada publicação nova também passa por uma triagem da IA, que sugere (sem confirmar
+// sozinha) se parece exigir um prazo.
+async function processarPublicacoesDJEN(encontradas, processosBase, intimacoesBase){
   const jaTemIds = new Set(intimacoesBase.map(i=>i.id));
   const novasBrutas = encontradas.filter(i=>!jaTemIds.has(i.id));
   const proxProcessos = processosBase.map(p=>({...p, andamentos:[...(p.andamentos||[])]}));
@@ -266,7 +306,7 @@ function processarPublicacoesDJEN(encontradas, processosBase, intimacoesBase){
   let processosCriados = 0;
   const processosAtualizadosIds = new Set();
 
-  novasBrutas.forEach(it=>{
+  for(const it of novasBrutas){
     const numLimpo = (it.numeroProcesso||"").replace(/\D/g,"");
     let proc = numLimpo ? proxProcessos.find(p=>(p.numero||"").replace(/\D/g,"")===numLimpo) : null;
 
@@ -292,6 +332,8 @@ function processarPublicacoesDJEN(encontradas, processosBase, intimacoesBase){
       processosCriados++;
     }
 
+    const analiseIA = await analisarPublicacaoIA(it.texto);
+
     if(proc){
       const desc = `Publicação DJEN: ${(it.texto||"").slice(0,200)||"—"}`;
       const jaExiste = proc.andamentos.some(a=>a.desc===desc && a.data===it.data);
@@ -300,11 +342,11 @@ function processarPublicacoesDJEN(encontradas, processosBase, intimacoesBase){
         movimentacoesNovas++;
         processosAtualizadosIds.add(proc.id);
       }
-      paraIntimacoes.push({...it, vinculada:true, processoId:proc.id});
+      paraIntimacoes.push({...it, vinculada:true, processoId:proc.id, analisadaIA:true, ...analiseIA, revisada:false});
     } else {
-      paraIntimacoes.push(it);
+      paraIntimacoes.push({...it, analisadaIA:true, ...analiseIA, revisada:false});
     }
-  });
+  }
 
   return {
     processos: proxProcessos,
@@ -1249,7 +1291,7 @@ function PaginaProcessos({processos,setProcessos,clientes,setClientes,abrirProce
     setBuscandoOAB(true);
     try{
       const encontradas = await buscarIntimacoesDJEN({oabNumero, oabUf, dias:30});
-      const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = processarPublicacoesDJEN(encontradas, processos, intimacoes);
+      const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = await processarPublicacoesDJEN(encontradas, processos, intimacoes);
       setProcessos(novosProcessos);
       setIntimacoes(novasIntimacoes);
       setResultadoOAB(resumo);
@@ -1637,13 +1679,15 @@ function PaginaIntimacoes({intimacoes,setIntimacoes,processos,setProcessos,oabNu
   const [erro,setErro] = useState("");
   const [resultado,setResultado] = useState("");
   const [vinculandoId,setVinculandoId] = useState(null);
-  const [criarPrazoDe,setCriarPrazoDe] = useState(null);
+  const [confirmandoId,setConfirmandoId] = useState(null);
+  const [formPrazo,setFormPrazo] = useState({data:"",descricao:""});
+  const [filtro,setFiltro] = useState("pendentes");
 
   const buscar = async () => {
     setErro(""); setResultado(""); setBuscando(true);
     try{
       const encontradas = await buscarIntimacoesDJEN({oabNumero,oabUf,dias:15});
-      const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = processarPublicacoesDJEN(encontradas, processos, intimacoes);
+      const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = await processarPublicacoesDJEN(encontradas, processos, intimacoes);
       setProcessos(novosProcessos);
       setIntimacoes(novasIntimacoes);
       if(resumo.totalPublicacoes===0){
@@ -1668,12 +1712,36 @@ function PaginaIntimacoes({intimacoes,setIntimacoes,processos,setProcessos,oabNu
     setVinculandoId(null);
   };
 
+  const abrirConfirmacao = (it) => {
+    const dataSugerida = it.diasPrazo ? adicionarDias(it.data, it.diasPrazo, it.diasUteis!==false) : "";
+    setFormPrazo({data:dataSugerida, descricao:it.descricaoAto||""});
+    setConfirmandoId(it.id);
+  };
+
+  const confirmarPrazo = (it) => {
+    if(it.processoId && formPrazo.data){
+      setProcessos(ps=>ps.map(p=>p.id===it.processoId?{...p,prazo:formPrazo.data,prazoAto:formPrazo.descricao||p.prazoAto}:p));
+    }
+    setIntimacoes(prev=>prev.map(i=>i.id===it.id?{...i,revisada:true}:i));
+    setConfirmandoId(null);
+  };
+
+  const dispensar = (it) => {
+    setIntimacoes(prev=>prev.map(i=>i.id===it.id?{...i,revisada:true}:i));
+    setConfirmandoId(null);
+  };
+
+  const precisamRevisao = intimacoes.filter(i=>i.analisadaIA && i.temPrazo && !i.revisada);
+  const listaExibida = filtro==="pendentes"
+    ? intimacoes.filter(i=>!i.revisada)
+    : intimacoes;
+
   return (
     <div className="fade-in">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:12}}>
         <div>
           <h2 style={{fontSize:30}}>Intimações</h2>
-          <div style={{color:"var(--text2)",fontSize:14.5}}>Publicações do Diário de Justiça Eletrônico Nacional (DJEN) para sua OAB</div>
+          <div style={{color:"var(--text2)",fontSize:14.5}}>Publicações do DJEN para sua OAB — a IA sinaliza quais parecem exigir prazo</div>
         </div>
         <button onClick={buscar} disabled={buscando} style={{...btnPrimario,display:"flex",alignItems:"center",gap:7}}>
           <Icon name="sync" size={15} color="#fff"/> {buscando?"Buscando…":"Buscar publicações"}
@@ -1688,21 +1756,53 @@ function PaginaIntimacoes({intimacoes,setIntimacoes,processos,setProcessos,oabNu
       {erro && <div style={{color:"var(--red)",fontSize:14,marginBottom:14}}>{erro}</div>}
       {resultado && <div style={{color:"var(--green)",fontSize:14,marginBottom:14}}>{resultado}</div>}
 
+      {precisamRevisao.length>0 && (
+        <div style={{background:"rgba(140,97,91,0.12)",border:"1px solid var(--gold)",borderRadius:9,padding:"12px 16px",marginBottom:18,fontSize:14,color:"var(--navy)"}}>
+          ⚠ {precisamRevisao.length} publicação(ões) com sugestão de prazo pendente de revisão.
+        </div>
+      )}
+
+      <div style={{display:"flex",gap:6,marginBottom:16}}>
+        {[["pendentes","Pendentes de revisão"],["todas","Todas"]].map(([v,l])=>(
+          <button key={v} onClick={()=>setFiltro(v)} style={{
+            padding:"8px 14px",borderRadius:20,border:"1px solid var(--border2)",fontSize:13,cursor:"pointer",
+            background: filtro===v?"var(--navy)":"#fff", color: filtro===v?"#fff":"var(--text2)"
+          }}>{l}</button>
+        ))}
+      </div>
+
       <div style={{background:"var(--card)",borderRadius:12,boxShadow:"var(--shadow)",border:"1px solid var(--border)",overflow:"hidden"}}>
-        {intimacoes.length===0 && <div style={{padding:30,textAlign:"center",color:"var(--text3)"}}>Nenhuma intimação carregada ainda.</div>}
-        {intimacoes.map((it,i)=>(
-          <div key={it.id} style={{padding:"14px 20px",borderBottom:i<intimacoes.length-1?"1px solid var(--border)":"none"}}>
+        {listaExibida.length===0 && <div style={{padding:30,textAlign:"center",color:"var(--text3)"}}>{filtro==="pendentes"?"Nenhuma publicação pendente de revisão.":"Nenhuma intimação carregada ainda."}</div>}
+        {listaExibida.map((it,i)=>(
+          <div key={it.id} style={{padding:"14px 20px",borderBottom:i<listaExibida.length-1?"1px solid var(--border)":"none"}}>
             <div style={{display:"flex",justifyContent:"space-between",gap:12}}>
               <div style={{fontWeight:600,fontSize:14.5}}>{it.orgao}</div>
               <div style={{fontSize:12.5,color:"var(--text3)"}}>{fmtData(it.data)}</div>
             </div>
             {it.numeroProcesso && <div style={{fontSize:12.5,color:"var(--text3)",marginBottom:4}}>{it.numeroProcesso}</div>}
             <div style={{fontSize:14,color:"var(--text2)",marginBottom:8}}>{(it.texto||"").slice(0,240)}{(it.texto||"").length>240?"…":""}</div>
-            {it.vinculada ? (
-              <Badge texto="vinculada ao processo" cor="var(--green)"/>
-            ) : (
-              <button onClick={()=>setVinculandoId(it.id)} style={{...btnSecundario,fontSize:12,padding:"6px 11px"}}>Vincular a um processo</button>
-            )}
+
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+              {it.vinculada && <Badge texto="vinculada ao processo" cor="var(--green)"/>}
+              {it.analisadaIA && it.temPrazo && (
+                <Badge texto={`⚠ prazo sugerido: ${it.diasPrazo||"?"} dia(s) ${it.diasUteis!==false?"úteis":"corridos"} — ${it.descricaoAto||"ato"}`} cor="var(--gold-dark)"/>
+              )}
+              {it.analisadaIA && !it.temPrazo && <Badge texto="sem indício de prazo (IA)" cor="var(--text3)"/>}
+              {it.revisada && <Badge texto="revisada" cor="var(--text3)"/>}
+            </div>
+
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {!it.vinculada && (
+                <button onClick={()=>setVinculandoId(it.id)} style={{...btnSecundario,fontSize:12,padding:"6px 11px"}}>Vincular a um processo</button>
+              )}
+              {it.analisadaIA && it.temPrazo && !it.revisada && (
+                <button onClick={()=>abrirConfirmacao(it)} style={{...btnPrimario,fontSize:12,padding:"6px 11px"}}>Confirmar prazo</button>
+              )}
+              {!it.revisada && (
+                <button onClick={()=>dispensar(it)} style={{...btnSecundario,fontSize:12,padding:"6px 11px"}}>Dispensar (sem prazo)</button>
+              )}
+            </div>
+
             {vinculandoId===it.id && (
               <div style={{marginTop:10,display:"flex",gap:8}}>
                 <select style={{...campoStyle,margin:0,flex:1}} onChange={e=>vincular(it.id, e.target.value)} defaultValue="">
@@ -1710,6 +1810,22 @@ function PaginaIntimacoes({intimacoes,setIntimacoes,processos,setProcessos,oabNu
                   {processos.map(p=><option key={p.id} value={p.id}>{p.numero||"Processo sem número"}</option>)}
                 </select>
                 <button onClick={()=>setVinculandoId(null)} style={btnSecundario}>Cancelar</button>
+              </div>
+            )}
+
+            {confirmandoId===it.id && (
+              <div style={{marginTop:12,padding:14,background:"var(--bg2)",borderRadius:8}}>
+                <div style={{fontSize:12.5,color:"var(--text2)",marginBottom:10}}>
+                  Sugestão gerada por IA — confira e ajuste a data antes de confirmar. Isso vai gravar o prazo no processo {it.numeroProcesso||"vinculado"}.
+                </div>
+                <label style={labelStyle}>Data do prazo</label>
+                <input type="date" style={campoStyle} value={formPrazo.data} onChange={e=>setFormPrazo({...formPrazo,data:e.target.value})}/>
+                <label style={labelStyle}>Descrição do ato</label>
+                <input style={campoStyle} value={formPrazo.descricao} onChange={e=>setFormPrazo({...formPrazo,descricao:e.target.value})} placeholder="Ex: Contestação"/>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                  <button onClick={()=>setConfirmandoId(null)} style={btnSecundario}>Cancelar</button>
+                  <button onClick={()=>confirmarPrazo(it)} disabled={!formPrazo.data} style={btnPrimario}>Confirmar e criar prazo</button>
+                </div>
               </div>
             )}
           </div>
@@ -2496,7 +2612,7 @@ function AppPrincipal({usuario, onSair}){
       if(temDJEN){
         try{
           const encontradas = await buscarIntimacoesDJEN({oabNumero:config.oabNumero, oabUf:config.oabUf, dias:7});
-          const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = processarPublicacoesDJEN(encontradas, processos, intimacoes);
+          const {processos: novosProcessos, intimacoes: novasIntimacoes, resumo} = await processarPublicacoesDJEN(encontradas, processos, intimacoes);
           if(resumo.movimentacoesNovas>0 || resumo.processosCriados>0) setProcessos(novosProcessos);
           if(novasIntimacoes!==intimacoes) setIntimacoes(novasIntimacoes);
           totalMovimentacoesDJEN = resumo.movimentacoesNovas;
