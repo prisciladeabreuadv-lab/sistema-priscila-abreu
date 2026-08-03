@@ -243,7 +243,20 @@ async function buscarIntimacoesDJEN({oabNumero, oabUf, dias=15}){
   const resp = await fetch(url);
   if(!resp.ok) throw new Error(`DJEN retornou erro ${resp.status}.`);
   const data = await resp.json();
-  const itens = data?.items || data?.content || [];
+  const itensBrutos = data?.items || data?.content || [];
+
+  // Proteção extra: a API do governo deveria filtrar pela UF da OAB, mas números de OAB se
+  // repetem entre estados (o mesmo número pode pertencer a advogados diferentes em UFs
+  // diferentes). Por segurança, descartamos qualquer publicação cujo texto não mencione
+  // explicitamente o número+UF informados, mesmo que a API tenha retornado.
+  const numeroLimpo = String(oabNumero).replace(/\D/g,"");
+  const ufLimpa = String(oabUf).trim().toUpperCase();
+  const padraoOab = new RegExp(`${ufLimpa}[\\s-]*0*${numeroLimpo}\\b`, "i");
+  const itens = itensBrutos.filter(it=>{
+    const textoCompleto = it.texto || it.conteudo || "";
+    return padraoOab.test(textoCompleto);
+  });
+
   return itens.map(it=>({
     id: it.id || uid(),
     data: (it.data_disponibilizacao || it.dataDisponibilizacao || "").slice(0,10),
