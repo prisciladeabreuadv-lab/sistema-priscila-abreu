@@ -571,6 +571,7 @@ function TelaLogin({onLogin}){
 const MENU = [
   {id:"dashboard", label:"Painel", icon:"dashboard"},
   {id:"processos", label:"Processos", icon:"processos"},
+  {id:"extrajudicial", label:"Extrajudicial", icon:"escudo"},
   {id:"clientes", label:"Clientes", icon:"clientes"},
   {id:"tarefas", label:"Tarefas", icon:"tarefas"},
   {id:"agenda", label:"Agenda", icon:"agenda"},
@@ -682,7 +683,7 @@ function Badge({texto,cor}){
 }
 
 // ---------- Página: Dashboard ----------
-function PaginaDashboard({processos,setProcessos,clientes,setClientes,tarefas,setTarefas,agenda,setAgenda,parcelas,onIrPara,onAbrirProcesso}){
+function PaginaDashboard({processos,setProcessos,extrajudiciais,clientes,setClientes,tarefas,setTarefas,agenda,setAgenda,parcelas,onIrPara,onAbrirProcesso}){
   // Resumo de prazos por categoria, cada uma com sua regra de contagem (dias úteis x dias corridos)
   const resumoPrazos = (lista, usarDiasUteis) => {
     const ativosComPrazo = lista.filter(p=>!p.arquivado && p.prazo);
@@ -696,13 +697,15 @@ function PaginaDashboard({processos,setProcessos,clientes,setClientes,tarefas,se
   };
 
   const resumoProcessos = useMemo(()=>resumoPrazos(processos, true), [processos]);
+  const resumoExtrajudicial = useMemo(()=>resumoPrazos(extrajudiciais||[], false), [extrajudiciais]);
 
   const prazosProximos = useMemo(()=>{
     const todos = [
       ...resumoProcessos.itens.map(p=>({...p, tipo:"Processo", pagina:"processos"})),
+      ...resumoExtrajudicial.itens.map(p=>({...p, tipo:"Extrajudicial", pagina:"extrajudicial"})),
     ];
     return todos.sort((a,b)=>a.dias-b.dias).slice(0,8);
-  },[resumoProcessos]);
+  },[resumoProcessos,resumoExtrajudicial]);
 
   const tarefasAbertas = tarefas.filter(t=>t.status!=="concluida" && !t.arquivada);
   const processosAtivos = processos.filter(p=>!p.arquivado);
@@ -855,6 +858,7 @@ Hoje é ${fmtDataHoje()}. Use essa data como referência para calcular datas rel
       <div style={{fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:.4,color:"var(--text2)",marginBottom:8,marginTop:8}}>Prazos por categoria</div>
       <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:26}}>
         <CaixaPrazo titulo="Processos" resumo={resumoProcessos} cor="var(--navy)" icon="processos" pagina="processos" regra="dias úteis"/>
+        <CaixaPrazo titulo="Extrajudicial" resumo={resumoExtrajudicial} cor="var(--gold-dark)" icon="escudo" pagina="extrajudicial" regra="dias corridos"/>
       </div>
 
       <div style={{background:"linear-gradient(135deg, var(--navy) 0%, var(--navy2) 100%)",borderRadius:12,padding:"20px 22px",marginBottom:22,boxShadow:"var(--shadow)"}}>
@@ -1087,6 +1091,16 @@ const LABELS_PROCESSO = {
   clienteLabel:"Cliente do escritório neste processo", mostrarDataJud:true, diasUteis:true,
 };
 
+// Mesma estrutura da tela de Processos, reaproveitada para procedimentos extrajudiciais
+// (sem número CNJ, portanto sem busca automática no DataJud/DJEN)
+const LABELS_EXTRAJUDICIAL = {
+  tituloPagina: "Extrajudicial", contagem:"processo(s) extrajudicial(is)", novo:"Novo processo extrajudicial", editar:"Editar processo extrajudicial",
+  numero:"Número/Referência", numeroPlaceholder:"Ex: NOT-0001/2026 ou referência interna", semNumero:"Sem número/referência",
+  excluirTitulo:"Excluir processo extrajudicial", excluirTexto:"Tem certeza que deseja excluir este processo extrajudicial? Esta ação não pode ser desfeita.",
+  buscaPlaceholder:"Buscar por número, parte, assunto...", vazio:"Nenhum processo extrajudicial encontrado.",
+  clienteLabel:"Cliente do escritório neste processo", mostrarDataJud:false, diasUteis:false,
+};
+
 // ---------- Modal: Formulário de Processo ----------
 function ModalFormProcesso({processo,clientes,onSave,onClose,onNovoCliente,labels=LABELS_PROCESSO}){
   const [f,setF] = useState(processo || {
@@ -1146,8 +1160,8 @@ function ModalFormProcesso({processo,clientes,onSave,onClose,onNovoCliente,label
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
           <div>
-            <label style={labelStyle}>Vara/Comarca</label>
-            <input style={campoStyle} value={f.vara} onChange={e=>s("vara",e.target.value)} placeholder="Ex: 2ª Vara Cível de Itaboraí"/>
+            <label style={labelStyle}>{labels.mostrarDataJud ? "Vara/Comarca" : "Órgão (cartório, prefeitura, secretaria, etc.)"}</label>
+            <input style={campoStyle} value={f.vara} onChange={e=>s("vara",e.target.value)} placeholder={labels.mostrarDataJud ? "Ex: 2ª Vara Cível de Itaboraí" : "Ex: 3º Ofício de Registro de Imóveis de Itaboraí"}/>
           </div>
           <div>
             <label style={labelStyle}>Valor da causa</label>
@@ -2545,6 +2559,7 @@ function AppPrincipal({usuario, onSair}){
 
   const [clientes,setClientes] = useState([]);
   const [processos,setProcessos] = useState([]);
+  const [extrajudiciais,setExtrajudiciais] = useState([]);
   const [tarefas,setTarefas] = useState([]);
   const [agenda,setAgenda] = useState([]);
   const [parcelas,setParcelas] = useState([]);
@@ -2558,6 +2573,7 @@ function AppPrincipal({usuario, onSair}){
     (async () => {
       setClientes(await stGet("clientes",[]));
       setProcessos(await stGet("processos",[]));
+      setExtrajudiciais(await stGet("extrajudiciais",[]));
       setTarefas(await stGet("tarefas",[]));
       setAgenda(await stGet("agenda",[]));
       setParcelas(await stGet("parcelas",[]));
@@ -2571,6 +2587,7 @@ function AppPrincipal({usuario, onSair}){
 
   useEffect(()=>{ if(carregado) stSet("clientes",clientes); },[clientes,carregado]);
   useEffect(()=>{ if(carregado) stSet("processos",processos); },[processos,carregado]);
+  useEffect(()=>{ if(carregado) stSet("extrajudiciais",extrajudiciais); },[extrajudiciais,carregado]);
   useEffect(()=>{ if(carregado) stSet("tarefas",tarefas); },[tarefas,carregado]);
   useEffect(()=>{ if(carregado) stSet("agenda",agenda); },[agenda,carregado]);
   useEffect(()=>{ if(carregado) stSet("parcelas",parcelas); },[parcelas,carregado]);
@@ -2683,13 +2700,29 @@ function AppPrincipal({usuario, onSair}){
           setProcessos(ps=>ps.map(x=>x.id===p.id?{...x,googleSyncedPrazo:p.prazo}:x));
         }catch(e){ /* tenta de novo na próxima verificação */ }
       }
+
+      const extrajudiciaisPendentes = extrajudiciais.filter(p=>p.prazo && !p.arquivado && p.googleSyncedPrazo!==p.prazo && diasEntre(p.prazo)>=0);
+      for(const p of extrajudiciaisPendentes){
+        const cli = clientes.find(c=>c.id===p.clienteId);
+        try{
+          await criarEventoGoogle(googleToken, {
+            data: p.prazo,
+            hora: "09:00",
+            titulo: `Prazo: ${p.prazoAto || "extrajudicial"} — ${p.numero || "sem número"}`,
+            local: "",
+            obs: `${cli?.nome ? `Cliente: ${cli.nome}. ` : ""}${p.assunto || ""}`,
+          });
+          setExtrajudiciais(ps=>ps.map(x=>x.id===p.id?{...x,googleSyncedPrazo:p.prazo}:x));
+        }catch(e){ /* tenta de novo na próxima verificação */ }
+      }
     })();
-  },[carregado, googleToken, agenda, tarefas, processos]);
+  },[carregado, googleToken, agenda, tarefas, processos, extrajudiciais]);
 
   const irParaProcesso = (id) => { setPagina("processos"); setAbrirProcessoId(id); };
 
   const contadores = {
     processos: processos.filter(p=>!p.arquivado && p.prazo && calcularDiasPrazo(p.prazo,true)<=3).length,
+    extrajudicial: extrajudiciais.filter(p=>!p.arquivado && p.prazo && calcularDiasPrazo(p.prazo,false)<=3).length,
     tarefas: tarefas.filter(t=>t.status!=="concluida" && !t.arquivada).length,
     intimacoes: intimacoes.filter(i=>!i.vinculada).length,
   };
@@ -2702,8 +2735,9 @@ function AppPrincipal({usuario, onSair}){
     <div style={{display:"flex",minHeight:"100vh"}}>
       <Sidebar paginaAtual={pagina} onIrPara={(p)=>{setPagina(p);setAbrirProcessoId(null);}} usuario={usuario} onSair={onSair} contadores={contadores}/>
       <div className="conteudo-principal" style={{flex:1,maxWidth:"100%",overflowX:"hidden"}}>
-        {pagina==="dashboard" && <PaginaDashboard processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} tarefas={tarefas} setTarefas={setTarefas} agenda={agenda} setAgenda={setAgenda} parcelas={parcelas} onIrPara={setPagina} onAbrirProcesso={irParaProcesso}/>}
+        {pagina==="dashboard" && <PaginaDashboard processos={processos} setProcessos={setProcessos} extrajudiciais={extrajudiciais} clientes={clientes} setClientes={setClientes} tarefas={tarefas} setTarefas={setTarefas} agenda={agenda} setAgenda={setAgenda} parcelas={parcelas} onIrPara={setPagina} onAbrirProcesso={irParaProcesso}/>}
         {pagina==="processos" && <PaginaProcessos processos={processos} setProcessos={setProcessos} clientes={clientes} setClientes={setClientes} abrirProcessoId={abrirProcessoId} onProcessoAberto={()=>setAbrirProcessoId(null)} datajudApiKey={config.datajudApiKey} oabNumero={config.oabNumero} oabUf={config.oabUf} intimacoes={intimacoes} setIntimacoes={setIntimacoes}/>}
+        {pagina==="extrajudicial" && <PaginaProcessos processos={extrajudiciais} setProcessos={setExtrajudiciais} clientes={clientes} setClientes={setClientes} labels={LABELS_EXTRAJUDICIAL}/>}
         {pagina==="clientes" && <PaginaClientes clientes={clientes} setClientes={setClientes} processos={processos} onAbrirProcesso={irParaProcesso}/>}
         {pagina==="tarefas" && <PaginaTarefas tarefas={tarefas} setTarefas={setTarefas} processos={processos} clientes={clientes}/>}
         {pagina==="agenda" && <PaginaAgenda agenda={agenda} setAgenda={setAgenda} processos={processos} clientes={clientes} googleToken={googleToken}/>}
